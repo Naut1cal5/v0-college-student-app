@@ -110,13 +110,23 @@ export default function HomePage() {
 
   if (!currentUser) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
-        <div className="w-full max-w-md">
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-black opacity-50"></div>
+        <div className="relative z-10 w-full max-w-md">
           <div className="text-center mb-8">
-            <h1 className="text-4xl font-bold text-gray-900 mb-2">Video Chat</h1>
-            <p className="text-gray-600">Connect with people through video and text</p>
+            <h1 className="text-5xl font-bold text-white mb-4 tracking-tight">
+              Campus<span className="text-purple-400">Chat</span>
+            </h1>
+            <p className="text-gray-300 text-lg">Connect with students worldwide through verified video chat</p>
           </div>
           <LoginForm onLogin={handleLogin} loading={loading} error={error} />
+        </div>
+
+        {/* Background decoration */}
+        <div className="absolute top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
+          <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"></div>
+          <div className="absolute top-3/4 right-1/4 w-64 h-64 bg-blue-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse animation-delay-2000"></div>
+          <div className="absolute bottom-1/4 left-1/3 w-64 h-64 bg-indigo-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse animation-delay-4000"></div>
         </div>
       </div>
     )

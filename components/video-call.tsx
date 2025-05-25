@@ -25,6 +25,7 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
   const [isAudioEnabled, setIsAudioEnabled] = useState(true)
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected">("connecting")
   const [remoteStreamReceived, setRemoteStreamReceived] = useState(false)
+  const [callDuration, setCallDuration] = useState(0)
 
   useEffect(() => {
     initializeCall()
@@ -33,11 +34,26 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
     }
   }, [])
 
+  useEffect(() => {
+    let interval: NodeJS.Timeout
+    if (connectionStatus === "connected") {
+      interval = setInterval(() => {
+        setCallDuration((prev) => prev + 1)
+      }, 1000)
+    }
+    return () => clearInterval(interval)
+  }, [connectionStatus])
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
+  }
+
   const initializeCall = async () => {
     try {
       console.log(`[${username}] Initializing call as ${isInitiator ? "initiator" : "receiver"}`)
 
-      // Get user media first
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 640, height: 480 },
         audio: true,
@@ -48,7 +64,6 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
         localVideoRef.current.srcObject = stream
       }
 
-      // Create peer connection with better configuration
       const configuration = {
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
@@ -62,13 +77,11 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
       const peerConnection = new RTCPeerConnection(configuration)
       peerConnectionRef.current = peerConnection
 
-      // Add local stream to peer connection
       stream.getTracks().forEach((track) => {
         console.log(`[${username}] Adding track:`, track.kind)
         peerConnection.addTrack(track, stream)
       })
 
-      // Handle remote stream
       peerConnection.ontrack = (event) => {
         console.log(`[${username}] Received remote track:`, event.track.kind)
         if (remoteVideoRef.current && event.streams[0]) {
@@ -78,7 +91,6 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
         }
       }
 
-      // Handle ICE candidates
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
           console.log(`[${username}] Sending ICE candidate`)
@@ -88,7 +100,6 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
         }
       }
 
-      // Handle connection state changes
       peerConnection.onconnectionstatechange = () => {
         console.log(`[${username}] Connection state:`, peerConnection.connectionState)
         if (peerConnection.connectionState === "connected") {
@@ -98,15 +109,12 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
         }
       }
 
-      // Handle ICE connection state
       peerConnection.oniceconnectionstatechange = () => {
         console.log(`[${username}] ICE connection state:`, peerConnection.iceConnectionState)
       }
 
-      // Set up signaling channel
       await setupSignalingChannel(peerConnection)
 
-      // If initiator, wait a bit then create offer
       if (isInitiator) {
         console.log(`[${username}] Will create offer in 2 seconds`)
         setTimeout(async () => {
@@ -186,7 +194,6 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
       console.log(`[${username}] Handling offer`)
       await peerConnection.setRemoteDescription(offer)
 
-      // Process queued ICE candidates
       while (iceCandidatesQueue.current.length > 0) {
         const candidate = iceCandidatesQueue.current.shift()
         if (candidate) {
@@ -209,7 +216,6 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
       console.log(`[${username}] Handling answer`)
       await peerConnection.setRemoteDescription(answer)
 
-      // Process queued ICE candidates
       while (iceCandidatesQueue.current.length > 0) {
         const candidate = iceCandidatesQueue.current.shift()
         if (candidate) {
@@ -227,7 +233,6 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
         await peerConnection.addIceCandidate(candidate)
         console.log(`[${username}] Added ICE candidate`)
       } else {
-        // Queue the candidate if remote description is not set yet
         iceCandidatesQueue.current.push(candidate)
         console.log(`[${username}] Queued ICE candidate`)
       }
@@ -275,7 +280,44 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
   }
 
   return (
-    <div className="flex flex-col h-screen bg-black relative">
+    <div className="flex flex-col h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 relative">
+      {/* Header */}
+      <div className="bg-black/20 backdrop-blur-lg border-b border-white/10 p-4">
+        <div className="flex justify-between items-center">
+          <div className="flex items-center space-x-4">
+            <h1 className="text-xl font-bold text-white">
+              Campus<span className="text-purple-400">Chat</span>
+            </h1>
+            <div className="flex items-center space-x-2">
+              <div
+                className={`w-3 h-3 rounded-full ${
+                  connectionStatus === "connected"
+                    ? "bg-green-400 animate-pulse"
+                    : connectionStatus === "connecting"
+                      ? "bg-yellow-400 animate-pulse"
+                      : "bg-red-400"
+                }`}
+              ></div>
+              <span className="text-gray-300 text-sm">
+                {connectionStatus === "connected"
+                  ? `Connected • ${formatDuration(callDuration)}`
+                  : connectionStatus === "connecting"
+                    ? "Connecting..."
+                    : "Disconnected"}
+              </span>
+            </div>
+          </div>
+          <Button
+            onClick={endCall}
+            variant="destructive"
+            className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600"
+          >
+            <PhoneOff className="w-4 h-4 mr-2" />
+            End Call
+          </Button>
+        </div>
+      </div>
+
       {/* Remote video (main view) */}
       <div className="flex-1 relative">
         <video
@@ -286,28 +328,26 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
           style={{ transform: "scaleX(-1)" }}
         />
         {connectionStatus === "connecting" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75">
+          <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-sm">
             <div className="text-white text-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-4"></div>
-              <div className="text-xl">Connecting...</div>
-              <div className="text-sm mt-2 opacity-75">
-                {isInitiator ? "Waiting for other user to join" : "Joining call"}
-              </div>
+              <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-purple-400 mx-auto mb-6"></div>
+              <div className="text-2xl font-bold mb-2">Connecting...</div>
+              <div className="text-gray-300">{isInitiator ? "Waiting for other user to join" : "Joining call"}</div>
             </div>
           </div>
         )}
         {connectionStatus === "disconnected" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
+          <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-sm">
             <div className="text-white text-center">
-              <div className="text-xl mb-4">Connection lost</div>
-              <Button onClick={endCall} variant="destructive">
+              <div className="text-2xl font-bold mb-4">Connection Lost</div>
+              <Button onClick={endCall} variant="destructive" size="lg">
                 End Call
               </Button>
             </div>
           </div>
         )}
         {!remoteStreamReceived && connectionStatus === "connected" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
+          <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-sm">
             <div className="text-white text-center">
               <div className="text-xl">Waiting for video...</div>
             </div>
@@ -316,7 +356,7 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
       </div>
 
       {/* Local video (picture-in-picture) */}
-      <div className="absolute top-4 right-4 w-48 h-36 bg-gray-800 rounded-lg overflow-hidden border-2 border-white">
+      <div className="absolute top-20 right-6 w-64 h-48 bg-black/50 rounded-xl overflow-hidden border-2 border-white/20 backdrop-blur-sm">
         <video
           ref={localVideoRef}
           autoPlay
@@ -325,17 +365,28 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
           className="w-full h-full object-cover"
           style={{ transform: "scaleX(-1)" }}
         />
-        <div className="absolute bottom-2 left-2 text-white text-xs bg-black bg-opacity-50 px-2 py-1 rounded">You</div>
+        <div className="absolute bottom-2 left-2 bg-black/50 backdrop-blur-sm text-white text-xs px-2 py-1 rounded">
+          You
+        </div>
+        {!isVideoEnabled && (
+          <div className="absolute inset-0 bg-black/75 flex items-center justify-center">
+            <VideoOff className="w-8 h-8 text-white" />
+          </div>
+        )}
       </div>
 
       {/* Controls */}
       <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2">
-        <div className="flex space-x-4 bg-black bg-opacity-50 rounded-full p-4">
+        <div className="flex space-x-4 bg-black/50 backdrop-blur-lg rounded-full p-4 border border-white/20">
           <Button
             variant={isAudioEnabled ? "secondary" : "destructive"}
             size="lg"
             onClick={toggleAudio}
-            className="rounded-full w-14 h-14"
+            className={`rounded-full w-16 h-16 ${
+              isAudioEnabled
+                ? "bg-white/20 hover:bg-white/30 text-white border-white/20"
+                : "bg-red-500 hover:bg-red-600 text-white"
+            }`}
           >
             {isAudioEnabled ? <Mic className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
           </Button>
@@ -344,41 +395,24 @@ export default function VideoCall({ roomId, userId, username, isInitiator, onEnd
             variant={isVideoEnabled ? "secondary" : "destructive"}
             size="lg"
             onClick={toggleVideo}
-            className="rounded-full w-14 h-14"
+            className={`rounded-full w-16 h-16 ${
+              isVideoEnabled
+                ? "bg-white/20 hover:bg-white/30 text-white border-white/20"
+                : "bg-red-500 hover:bg-red-600 text-white"
+            }`}
           >
             {isVideoEnabled ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
           </Button>
 
-          <Button variant="destructive" size="lg" onClick={endCall} className="rounded-full w-14 h-14">
+          <Button
+            variant="destructive"
+            size="lg"
+            onClick={endCall}
+            className="rounded-full w-16 h-16 bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600"
+          >
             <PhoneOff className="w-6 h-6" />
           </Button>
         </div>
-      </div>
-
-      {/* Connection status indicator */}
-      <div className="absolute top-4 left-4">
-        <div
-          className={`px-3 py-1 rounded-full text-sm font-medium ${
-            connectionStatus === "connected"
-              ? "bg-green-500 text-white"
-              : connectionStatus === "connecting"
-                ? "bg-yellow-500 text-black"
-                : "bg-red-500 text-white"
-          }`}
-        >
-          {connectionStatus === "connected"
-            ? "Connected"
-            : connectionStatus === "connecting"
-              ? "Connecting..."
-              : "Disconnected"}
-        </div>
-      </div>
-
-      {/* Debug info (remove in production) */}
-      <div className="absolute bottom-4 left-4 text-white text-xs bg-black bg-opacity-50 p-2 rounded">
-        <div>Role: {isInitiator ? "Initiator" : "Receiver"}</div>
-        <div>Status: {connectionStatus}</div>
-        <div>Remote Stream: {remoteStreamReceived ? "Yes" : "No"}</div>
       </div>
     </div>
   )
