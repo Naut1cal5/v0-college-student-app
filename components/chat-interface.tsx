@@ -30,7 +30,6 @@ interface ChatRoom {
 interface User {
   id: string
   username: string
-  user_status: string
 }
 
 export default function ChatInterface({ currentUser }: { currentUser: User }) {
@@ -41,86 +40,24 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
   const [isInVideoCall, setIsInVideoCall] = useState(false)
   const [onlineCount, setOnlineCount] = useState(0)
   const [otherUser, setOtherUser] = useState<string>("")
-  const [matchingStatus, setMatchingStatus] = useState<"idle" | "searching" | "matched">("idle")
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const matchingChannelRef = useRef<any>(null)
-  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
     getOnlineCount()
-    setupMatchingSubscription()
-    checkForExistingRoom()
-
     const interval = setInterval(getOnlineCount, 30000)
-    return () => {
-      clearInterval(interval)
-      cleanup()
-    }
+    return () => clearInterval(interval)
   }, [])
 
   useEffect(() => {
     if (chatRoom) {
       subscribeToMessages()
       setOtherUser(chatRoom.user1_id === currentUser.id ? chatRoom.user2_username : chatRoom.user1_username)
-      setMatchingStatus("matched")
-      setIsSearching(false)
     }
   }, [chatRoom])
 
   useEffect(() => {
     scrollToBottom()
   }, [messages])
-
-  const setupMatchingSubscription = () => {
-    // Subscribe to chat room changes to detect when we get matched
-    const roomChannel = supabase
-      .channel(`user-rooms-${currentUser.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "chat_rooms",
-          filter: `user2_id=eq.${currentUser.id}`,
-        },
-        (payload) => {
-          console.log(`[${currentUser.username}] Received room notification:`, payload.new)
-          const newRoom = payload.new as ChatRoom
-          if (newRoom.is_active) {
-            setChatRoom(newRoom)
-            setMatchingStatus("matched")
-            setIsSearching(false)
-            // Clear any pending search timeouts
-            if (searchTimeoutRef.current) {
-              clearTimeout(searchTimeoutRef.current)
-              searchTimeoutRef.current = null
-            }
-          }
-        },
-      )
-      .subscribe()
-
-    matchingChannelRef.current = roomChannel
-  }
-
-  const checkForExistingRoom = async () => {
-    try {
-      // Check if user is already in an active room
-      const { data: existingRooms } = await supabase
-        .from("chat_rooms")
-        .select("*")
-        .or(`user1_id.eq.${currentUser.id},user2_id.eq.${currentUser.id}`)
-        .eq("is_active", true)
-        .limit(1)
-
-      if (existingRooms && existingRooms.length > 0) {
-        console.log(`[${currentUser.username}] Found existing room:`, existingRooms[0])
-        setChatRoom(existingRooms[0])
-      }
-    } catch (error) {
-      console.error("Error checking for existing room:", error)
-    }
-  }
 
   const getOnlineCount = async () => {
     try {
@@ -132,56 +69,25 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
   }
 
   const findMatch = async () => {
-    if (isSearching || matchingStatus !== "idle") {
-      console.log(`[${currentUser.username}] Already searching or matched`)
-      return
-    }
-
     setIsSearching(true)
-    setMatchingStatus("searching")
 
     try {
-      console.log(`[${currentUser.username}] Starting search for match`)
+      console.log("Adding user to waiting queue:", currentUser.username)
 
-      // Update user status to searching
-      await supabase.from("users").update({ user_status: "searching" }).eq("id", currentUser.id)
-
-      // Add to waiting queue with conflict resolution
-      const { error: queueError } = await supabase.from("waiting_queue").upsert(
-        {
-          user_id: currentUser.id,
-          username: currentUser.username,
-        },
-        {
-          onConflict: "user_id",
-        },
-      )
+      const { error: queueError } = await supabase.from("waiting_queue").upsert({
+        user_id: currentUser.id,
+        username: currentUser.username,
+      })
 
       if (queueError) {
         console.error("Error adding to queue:", queueError)
         throw queueError
       }
 
-      // Start the matching process
-      await attemptMatching()
-    } catch (error) {
-      console.error("Error in findMatch:", error)
-      setIsSearching(false)
-      setMatchingStatus("idle")
-      await supabase.from("users").update({ user_status: "idle" }).eq("id", currentUser.id)
-    }
-  }
-
-  const attemptMatching = async () => {
-    try {
-      console.log(`[${currentUser.username}] Attempting to find match`)
-
-      // Look for other users in queue (excluding self)
       const { data: waitingUsers, error: searchError } = await supabase
         .from("waiting_queue")
         .select("*")
         .neq("user_id", currentUser.id)
-        .order("created_at", { ascending: true })
         .limit(1)
 
       if (searchError) {
@@ -189,11 +95,12 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
         throw searchError
       }
 
+      console.log("Found waiting users:", waitingUsers)
+
       if (waitingUsers && waitingUsers.length > 0) {
         const matchedUser = waitingUsers[0]
-        console.log(`[${currentUser.username}] Found potential match:`, matchedUser.username)
+        console.log("Matched with user:", matchedUser.username)
 
-        // Try to create the room (this will fail if someone else already matched with this user)
         const { data: room, error: roomError } = await supabase
           .from("chat_rooms")
           .insert({
@@ -207,60 +114,49 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
           .single()
 
         if (roomError) {
-          console.log(`[${currentUser.username}] Failed to create room, user might be taken:`, roomError)
-          // Remove the taken user from queue and try again
-          await supabase.from("waiting_queue").delete().eq("user_id", matchedUser.user_id)
-
-          // Schedule another attempt
-          searchTimeoutRef.current = setTimeout(() => {
-            if (isSearching && matchingStatus === "searching") {
-              attemptMatching()
-            }
-          }, 1000)
-          return
+          console.error("Error creating room:", roomError)
+          throw roomError
         }
 
-        console.log(`[${currentUser.username}] Successfully created room:`, room)
-
-        // Update both users' status
-        await Promise.all([
-          supabase.from("users").update({ user_status: "matched" }).eq("id", currentUser.id),
-          supabase.from("users").update({ user_status: "matched" }).eq("id", matchedUser.user_id),
-        ])
-
-        // Remove both users from waiting queue
-        await supabase.from("waiting_queue").delete().in("user_id", [currentUser.id, matchedUser.user_id])
-
-        // Set the room for the current user (the other user will get it via subscription)
+        console.log("Created room:", room)
         setChatRoom(room)
-        setMatchingStatus("matched")
         setIsSearching(false)
 
-        console.log(`[${currentUser.username}] Match successful!`)
+        await supabase.from("waiting_queue").delete().in("user_id", [currentUser.id, matchedUser.user_id])
+        console.log("Removed users from queue")
 
-        // Auto-start video call after a short delay
         setTimeout(() => {
           setIsInVideoCall(true)
         }, 2000)
       } else {
-        console.log(`[${currentUser.username}] No matches found, will retry`)
+        const { data: existingRoom } = await supabase
+          .from("chat_rooms")
+          .select("*")
+          .eq("user2_id", currentUser.id)
+          .eq("is_active", true)
+          .single()
 
-        // No matches found, schedule another attempt
-        searchTimeoutRef.current = setTimeout(() => {
-          if (isSearching && matchingStatus === "searching") {
-            attemptMatching()
-          }
-        }, 2000)
+        if (existingRoom) {
+          console.log("Found existing room:", existingRoom)
+          setChatRoom(existingRoom)
+          setIsSearching(false)
+          await supabase.from("waiting_queue").delete().eq("user_id", currentUser.id)
+
+          setTimeout(() => {
+            setIsInVideoCall(true)
+          }, 1000)
+        } else {
+          console.log("No match found, waiting...")
+          setTimeout(() => {
+            if (isSearching) {
+              findMatch()
+            }
+          }, 2000)
+        }
       }
     } catch (error) {
-      console.error(`[${currentUser.username}] Error in attemptMatching:`, error)
-
-      // Schedule retry on error
-      searchTimeoutRef.current = setTimeout(() => {
-        if (isSearching && matchingStatus === "searching") {
-          attemptMatching()
-        }
-      }, 3000)
+      console.error("Error finding match:", error)
+      setIsSearching(false)
     }
   }
 
@@ -338,18 +234,12 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
     if (!chatRoom) return
 
     try {
-      // End the chat room
       await supabase.from("chat_rooms").update({ is_active: false }).eq("id", chatRoom.id)
 
-      // Update user status back to idle
-      await supabase.from("users").update({ user_status: "idle" }).eq("id", currentUser.id)
-
-      // Reset state
       setChatRoom(null)
       setMessages([])
       setIsInVideoCall(false)
       setIsSearching(false)
-      setMatchingStatus("idle")
       setOtherUser("")
     } catch (error) {
       console.error("Error ending chat:", error)
@@ -357,26 +247,8 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
   }
 
   const stopSearching = async () => {
-    console.log(`[${currentUser.username}] Stopping search`)
-
     setIsSearching(false)
-    setMatchingStatus("idle")
-
-    // Clear any pending timeouts
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current)
-      searchTimeoutRef.current = null
-    }
-
-    try {
-      // Update user status and remove from queue
-      await Promise.all([
-        supabase.from("users").update({ user_status: "idle" }).eq("id", currentUser.id),
-        supabase.from("waiting_queue").delete().eq("user_id", currentUser.id),
-      ])
-    } catch (error) {
-      console.error("Error stopping search:", error)
-    }
+    await supabase.from("waiting_queue").delete().eq("user_id", currentUser.id)
   }
 
   const scrollToBottom = () => {
@@ -384,28 +256,10 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
   }
 
   const logout = async () => {
-    await cleanup()
-    window.location.reload()
-  }
-
-  const cleanup = async () => {
-    // Clear timeouts
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current)
-    }
-
-    // Remove subscriptions
-    if (matchingChannelRef.current) {
-      supabase.removeChannel(matchingChannelRef.current)
-    }
-
-    // Update user status
     if (currentUser) {
-      await Promise.all([
-        supabase.from("users").update({ is_online: false, user_status: "idle" }).eq("id", currentUser.id),
-        supabase.from("waiting_queue").delete().eq("user_id", currentUser.id),
-      ])
+      await supabase.from("users").update({ is_online: false }).eq("id", currentUser.id)
     }
+    window.location.reload()
   }
 
   if (isInVideoCall && chatRoom) {
@@ -434,14 +288,6 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
               <Users className="w-4 h-4 text-gray-300" />
               <span className="text-gray-300 text-sm font-medium">{onlineCount} online</span>
             </div>
-            {matchingStatus !== "idle" && (
-              <div className="flex items-center space-x-2 bg-yellow-500/20 rounded-full px-4 py-2">
-                <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
-                <span className="text-yellow-200 text-sm font-medium">
-                  {matchingStatus === "searching" ? "Searching..." : "Matched!"}
-                </span>
-              </div>
-            )}
           </div>
           <div className="flex items-center space-x-4">
             <div className="text-gray-300 text-sm">
@@ -477,7 +323,6 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
                 <Button
                   onClick={findMatch}
                   size="lg"
-                  disabled={matchingStatus !== "idle"}
                   className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white font-semibold px-12 py-4 text-lg rounded-full transition-all duration-200 transform hover:scale-105"
                 >
                   <Search className="w-6 h-6 mr-3" />
@@ -497,7 +342,7 @@ export default function ChatInterface({ currentUser }: { currentUser: User }) {
                     <Search className="w-12 h-12 text-white" />
                   </div>
                   <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-purple-400 mx-auto mb-6"></div>
-                  <h2 className="text-3xl font-bold text-white mb-4">Finding Your Perfect Match...</h2>
+                  <h2 className="text-3xl font-bold text-white mb-4">Finding Your Match...</h2>
                   <p className="text-gray-300 text-lg mb-8">We're connecting you with another verified student</p>
                   <Button
                     variant="outline"
