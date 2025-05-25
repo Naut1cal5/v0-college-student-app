@@ -8,6 +8,7 @@ import ChatInterface from "@/components/chat-interface"
 interface User {
   id: string
   username: string
+  user_status: string
 }
 
 export default function HomePage() {
@@ -16,15 +17,18 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    // Clean up offline users on page load
-    const cleanupOfflineUsers = async () => {
+    // Clean up offline users and reset statuses on page load
+    const cleanupUsers = async () => {
       try {
-        await supabase.from("users").update({ is_online: false }).eq("is_online", true)
+        await supabase.from("users").update({ is_online: false, user_status: "idle" }).eq("is_online", true)
+
+        // Clear waiting queue
+        await supabase.from("waiting_queue").delete().neq("id", "00000000-0000-0000-0000-000000000000")
       } catch (error) {
-        console.error("Error cleaning up offline users:", error)
+        console.error("Error cleaning up users:", error)
       }
     }
-    cleanupOfflineUsers()
+    cleanupUsers()
   }, [])
 
   const handleLogin = async (username: string) => {
@@ -49,10 +53,10 @@ export default function HomePage() {
       let user: User
 
       if (existingUser) {
-        // Update existing user to online
+        // Update existing user to online and idle
         const { data: updatedUser, error: updateError } = await supabase
           .from("users")
-          .update({ is_online: true })
+          .update({ is_online: true, user_status: "idle" })
           .eq("id", existingUser.id)
           .select()
           .single()
@@ -67,6 +71,7 @@ export default function HomePage() {
           .insert({
             username,
             is_online: true,
+            user_status: "idle",
           })
           .select()
           .single()
@@ -95,7 +100,10 @@ export default function HomePage() {
     // Set user offline when leaving the page
     const handleBeforeUnload = async () => {
       if (currentUser) {
-        await supabase.from("users").update({ is_online: false }).eq("id", currentUser.id)
+        await Promise.all([
+          supabase.from("users").update({ is_online: false, user_status: "idle" }).eq("id", currentUser.id),
+          supabase.from("waiting_queue").delete().eq("user_id", currentUser.id),
+        ])
       }
     }
 
@@ -103,7 +111,10 @@ export default function HomePage() {
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload)
       if (currentUser) {
-        supabase.from("users").update({ is_online: false }).eq("id", currentUser.id)
+        Promise.all([
+          supabase.from("users").update({ is_online: false, user_status: "idle" }).eq("id", currentUser.id),
+          supabase.from("waiting_queue").delete().eq("user_id", currentUser.id),
+        ])
       }
     }
   }, [currentUser])
